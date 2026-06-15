@@ -25,6 +25,11 @@ type PageState = {
   updated_at?: string;
 };
 
+type PageSnapshot = {
+  text: string;
+  screenshot: Buffer;
+};
+
 function requireEnv(name: string, value: string | undefined): string {
   if (!value) throw new Error(`Missing env variable: ${name}`);
   return value;
@@ -248,7 +253,7 @@ async function openHousingSectionIfNeeded(
 
         if (await element.isVisible({ timeout: 1000 })) {
           await element.click({ timeout: 3000, force: true });
-          await page.waitForTimeout(1500);
+          await page.waitForTimeout(3000);
 
           const appeared = await page
             .getByText(expectedText)
