@@ -1,3 +1,4 @@
+import "dotenv/config";
 import { chromium } from "playwright";
 import crypto from "node:crypto";
 import { createClient } from "@supabase/supabase-js";
