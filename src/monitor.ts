@@ -2,7 +2,8 @@ import { chromium } from "playwright";
 import crypto from "node:crypto";
 import { createClient } from "@supabase/supabase-js";
 
-const TARGET_URL = process.env.TARGET_URL ?? "https://math-genius-woad.vercel.app/lang";
+const TARGET_URL =
+  process.env.TARGET_URL ?? "https://math-genius-woad.vercel.app/lang";
 const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -45,13 +46,15 @@ async function sendSlackAlert(message: string): Promise<void> {
   const response = await fetch(SLACK_WEBHOOK_URL, {
     method: "POST",
     headers: {
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
     },
-    body: JSON.stringify({ text: message })
+    body: JSON.stringify({ text: message }),
   });
 
   if (!response.ok) {
-    throw new Error(`Slack alert failed: ${response.status} ${await response.text()}`);
+    throw new Error(
+      `Slack alert failed: ${response.status} ${await response.text()}`,
+    );
   }
 }
 
@@ -64,7 +67,9 @@ function makeShortDiff(oldText: string | null, newText: string): string {
   const addedWords = newWords.filter((word) => word && !oldWords.has(word));
   const preview = addedWords.slice(0, 80).join(" ");
 
-  return preview || "Page changed, but exact text difference is small or structural.";
+  return (
+    preview || "Page changed, but exact text difference is small or structural."
+  );
 }
 
 async function getPageText(): Promise<string> {
@@ -73,13 +78,15 @@ async function getPageText(): Promise<string> {
   try {
     const page = await browser.newPage({
       userAgent:
-        "Mozilla/5.0 PageMonitor/1.0 (+personal availability notification; no automated application submission)"
+        "Mozilla/5.0 PageMonitor/1.0 (+personal availability notification; no automated application submission)",
     });
 
     await page.goto(TARGET_URL, {
-      waitUntil: "networkidle",
-      timeout: 45000
+      waitUntil: "domcontentloaded",
+      timeout: 30000,
     });
+
+    await page.waitForTimeout(3000);
 
     const text = await page.locator("body").innerText();
 
@@ -91,15 +98,18 @@ async function getPageText(): Promise<string> {
 
 async function main(): Promise<void> {
   const supabaseUrl = requireEnv("SUPABASE_URL", SUPABASE_URL);
-  const supabaseKey = requireEnv("SUPABASE_SERVICE_ROLE_KEY", SUPABASE_SERVICE_ROLE_KEY);
+  const supabaseKey = requireEnv(
+    "SUPABASE_SERVICE_ROLE_KEY",
+    SUPABASE_SERVICE_ROLE_KEY,
+  );
   requireEnv("TARGET_URL", TARGET_URL);
   requireEnv("SLACK_WEBHOOK_URL", SLACK_WEBHOOK_URL);
 
   const supabase = createClient(supabaseUrl, supabaseKey, {
     auth: {
       persistSession: false,
-      autoRefreshToken: false
-    }
+      autoRefreshToken: false,
+    },
   });
 
   const jitterMs = Math.floor(Math.random() * 30000);
@@ -123,14 +133,16 @@ async function main(): Promise<void> {
       page_url: TARGET_URL,
       page_hash: currentHash,
       page_text: currentText,
-      updated_at: new Date().toISOString()
+      updated_at: new Date().toISOString(),
     });
 
     if (insertError) {
       throw new Error(`Supabase insert error: ${insertError.message}`);
     }
 
-    await sendSlackAlert(`✅ Web Observer started. First snapshot saved.\n${TARGET_URL}`);
+    await sendSlackAlert(
+      `✅ Web Observer started. First snapshot saved.\n${TARGET_URL}`,
+    );
     console.log("Initial snapshot saved.");
     return;
   }
@@ -143,7 +155,7 @@ async function main(): Promise<void> {
       `URL: ${TARGET_URL}`,
       "",
       "Possible new content:",
-      diffPreview.slice(0, 1000)
+      diffPreview.slice(0, 1000),
     ].join("\n");
 
     await sendSlackAlert(message);
@@ -153,7 +165,7 @@ async function main(): Promise<void> {
       .update({
         page_hash: currentHash,
         page_text: currentText,
-        updated_at: new Date().toISOString()
+        updated_at: new Date().toISOString(),
       })
       .eq("page_url", TARGET_URL);
 
