@@ -231,17 +231,7 @@ async function openHousingSectionIfNeeded(
     return;
   }
 
-  const possibleArrowSelectors = [
-    "#arrowdown",
-    "lottie-player#arrowdown",
-    '[aria-label="Lottie animation"]',
-    "svg",
-    "[class*='arrow']",
-    "[aria-label*='down' i]",
-    "[aria-label*='scroll' i]",
-    "button:has(svg)",
-    "a:has(svg)",
-  ];
+  const possibleArrowSelectors = ["#arrowdown", ".arrowdown"];
 
   for (const selector of possibleArrowSelectors) {
     try {
@@ -269,6 +259,19 @@ async function openHousingSectionIfNeeded(
     } catch {
       // ignore and try next selector
     }
+  }
+
+  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+  await page.waitForTimeout(1500);
+
+  const appearedAfterScroll = await page
+    .getByText(expectedText)
+    .isVisible({ timeout: 3000 })
+    .catch(() => false);
+
+  if (appearedAfterScroll) {
+    console.log("Housing section opened after scrolling down.");
+    return;
   }
 
   console.log("Housing section text did not appear after arrow click.");
