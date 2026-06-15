@@ -1,7 +1,9 @@
 import "dotenv/config";
-import { chromium } from "playwright";
+import { chromium, type Page } from "playwright";
 import crypto from "node:crypto";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+
+type ChromiumLaunchOptions = NonNullable<Parameters<typeof chromium.launch>[0]>;
 
 const TARGET_URLS =
   process.env.TARGET_URLS?.split(",")
@@ -11,6 +13,7 @@ const TARGET_URLS =
 const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const CHROMIUM_EXECUTABLE_PATH = process.env.CHROMIUM_EXECUTABLE_PATH?.trim();
 
 type PageState = {
   page_url: string;
@@ -37,6 +40,37 @@ function normalizeText(text: string): string {
     .replace(/\s+/g, " ")
     .replace(/\d{1,2}:\d{2}(:\d{2})?/g, "[time]")
     .trim();
+}
+
+function getChromiumLaunchOptions(): ChromiumLaunchOptions {
+  return {
+    headless: true,
+    ...(CHROMIUM_EXECUTABLE_PATH
+      ? { executablePath: CHROMIUM_EXECUTABLE_PATH }
+      : {}),
+  };
+}
+
+function isMissingPlaywrightBrowser(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    error.message.includes("Executable doesn't exist") &&
+    error.message.includes("playwright install")
+  );
+}
+
+async function launchChromium() {
+  try {
+    return await chromium.launch(getChromiumLaunchOptions());
+  } catch (error: unknown) {
+    if (isMissingPlaywrightBrowser(error)) {
+      throw new Error(
+        "Playwright Chromium is not installed. Run `npx playwright install chromium` or set CHROMIUM_EXECUTABLE_PATH.",
+      );
+    }
+
+    throw error;
+  }
 }
 
 async function sendSlackAlert(message: string): Promise<void> {
@@ -74,8 +108,101 @@ function makeShortDiff(oldText: string | null, newText: string): string {
   );
 }
 
+async function acceptCookiesIfVisible(page: Page): Promise<void> {
+  const cookieButtons = [
+    "button:has-text('Alle akzeptieren')",
+    "button:has-text('Alle auswählen')",
+    "button:has-text('Akzeptieren')",
+    "button:has-text('Accept all')",
+    "button:has-text('Accept')",
+    "text=Alle akzeptieren",
+    "text=Alle auswählen",
+    "text=Akzeptieren",
+  ];
+
+  for (const selector of cookieButtons) {
+    try {
+      const button = page.locator(selector).first();
+
+      if (await button.isVisible({ timeout: 3000 })) {
+        await button.click();
+        await page.waitForTimeout(1000);
+        console.log(`Accepted cookies using selector: ${selector}`);
+        return;
+      }
+    } catch {
+      // ignore and try next selector
+    }
+  }
+
+  console.log("Cookie banner not found.");
+}
+
+async function openHousingSectionIfNeeded(
+  page: Page,
+  targetUrl: string,
+): Promise<void> {
+  if (!targetUrl.includes("birch-seebach.ch")) {
+    return;
+  }
+
+  const expectedText = "Freie Objekte werden hier befristet ausgeschrieben.";
+
+  if (
+    await page
+      .getByText(expectedText)
+      .isVisible({ timeout: 3000 })
+      .catch(() => false)
+  ) {
+    console.log("Housing section is already visible.");
+    return;
+  }
+
+  const possibleArrowSelectors = [
+    "#arrowdown",
+    "lottie-player#arrowdown",
+    '[aria-label="Lottie animation"]',
+    "svg",
+    "[class*='arrow']",
+    "[aria-label*='down' i]",
+    "[aria-label*='scroll' i]",
+    "button:has(svg)",
+    "a:has(svg)",
+  ];
+
+  for (const selector of possibleArrowSelectors) {
+    try {
+      const elements = page.locator(selector);
+      const count = await elements.count();
+
+      for (let i = 0; i < Math.min(count, 10); i++) {
+        const element = elements.nth(i);
+
+        if (await element.isVisible({ timeout: 1000 })) {
+          await element.click({ timeout: 3000, force: true });
+          await page.waitForTimeout(1500);
+
+          const appeared = await page
+            .getByText(expectedText)
+            .isVisible({ timeout: 3000 })
+            .catch(() => false);
+
+          if (appeared) {
+            console.log(`Housing section opened using selector: ${selector}`);
+            return;
+          }
+        }
+      }
+    } catch {
+      // ignore and try next selector
+    }
+  }
+
+  console.log("Housing section text did not appear after arrow click.");
+}
+
 async function getPageText(targetUrl: string): Promise<string> {
-  const browser = await chromium.launch({ headless: true });
+  const browser = await launchChromium();
 
   try {
     const page = await browser.newPage({
@@ -87,6 +214,10 @@ async function getPageText(targetUrl: string): Promise<string> {
       waitUntil: "domcontentloaded",
       timeout: 30000,
     });
+
+    await acceptCookiesIfVisible(page);
+
+    await openHousingSectionIfNeeded(page, targetUrl);
 
     await page.waitForTimeout(3000);
 
