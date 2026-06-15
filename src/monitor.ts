@@ -2,6 +2,7 @@ import "dotenv/config";
 import { chromium, type Page } from "playwright";
 import crypto from "node:crypto";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { Buffer } from "node:buffer";
 
 type ChromiumLaunchOptions = NonNullable<Parameters<typeof chromium.launch>[0]>;
 
@@ -14,6 +15,8 @@ const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const CHROMIUM_EXECUTABLE_PATH = process.env.CHROMIUM_EXECUTABLE_PATH?.trim();
+const SUPABASE_SCREENSHOT_BUCKET =
+  process.env.SUPABASE_SCREENSHOT_BUCKET ?? "web-observer-screenshots";
 
 type PageState = {
   page_url: string;
@@ -49,6 +52,71 @@ function getChromiumLaunchOptions(): ChromiumLaunchOptions {
       ? { executablePath: CHROMIUM_EXECUTABLE_PATH }
       : {}),
   };
+}
+
+async function getPageSnapshot(targetUrl: string): Promise<PageSnapshot> {
+  const browser = await chromium.launch({ headless: true });
+
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1440, height: 1200 },
+      userAgent:
+        "Mozilla/5.0 PageMonitor/1.0 (+personal availability notification; no automated application submission)",
+    });
+
+    await page.goto(targetUrl, {
+      waitUntil: "domcontentloaded",
+      timeout: 30000,
+    });
+
+    await acceptCookiesIfVisible(page);
+    await openHousingSectionIfNeeded(page, targetUrl);
+
+    await page.waitForTimeout(3000);
+
+    const text = await page.locator("body").innerText();
+
+    const screenshot = await page.screenshot({
+      fullPage: true,
+      type: "png",
+    });
+
+    return {
+      text: normalizeText(text),
+      screenshot,
+    };
+  } finally {
+    await browser.close();
+  }
+}
+
+async function uploadScreenshot(
+  supabase: SupabaseClient,
+  targetUrl: string,
+  screenshot: Buffer,
+): Promise<string> {
+  const safeUrl = targetUrl
+    .replace(/^https?:\/\//, "")
+    .replace(/[^a-zA-Z0-9.-]/g, "_");
+
+  const filePath = `${safeUrl}/${Date.now()}.png`;
+
+  const { error } = await supabase.storage
+    .from(SUPABASE_SCREENSHOT_BUCKET)
+    .upload(filePath, screenshot, {
+      contentType: "image/png",
+      upsert: false,
+    });
+
+  if (error) {
+    throw new Error(`Supabase screenshot upload error: ${error.message}`);
+  }
+
+  const { data } = supabase.storage
+    .from(SUPABASE_SCREENSHOT_BUCKET)
+    .getPublicUrl(filePath);
+
+  return data.publicUrl;
 }
 
 function isMissingPlaywrightBrowser(error: unknown): boolean {
@@ -235,7 +303,8 @@ async function checkPage(
 ): Promise<void> {
   console.log(`Checking: ${targetUrl}`);
 
-  const currentText = await getPageText(targetUrl);
+  const snapshot = await getPageSnapshot(targetUrl);
+  const currentText = snapshot.text;
   const currentHash = hashText(currentText);
 
   const { data: previousState, error: selectError } = await supabase
@@ -274,9 +343,17 @@ async function checkPage(
   if (previousState.page_hash !== currentHash) {
     const diffPreview = makeShortDiff(previousState.page_text, currentText);
 
+    const screenshotUrl = await uploadScreenshot(
+      supabase,
+      targetUrl,
+      snapshot.screenshot,
+    );
+
     const message = [
       "🚨 Page changed!",
       `URL: ${targetUrl}`,
+      "",
+      `Screenshot: ${screenshotUrl}`,
       "",
       "Possible new content:",
       diffPreview.slice(0, 1000),
