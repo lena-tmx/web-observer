@@ -1,10 +1,13 @@
 import "dotenv/config";
 import { chromium } from "playwright";
 import crypto from "node:crypto";
-import { createClient } from "@supabase/supabase-js";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
-const TARGET_URL =
-  process.env.TARGET_URL ?? "https://math-genius-woad.vercel.app/lang";
+const TARGET_URLS =
+  process.env.TARGET_URLS?.split(",")
+    .map((url) => url.trim())
+    .filter(Boolean) ?? [];
+
 const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -17,9 +20,7 @@ type PageState = {
 };
 
 function requireEnv(name: string, value: string | undefined): string {
-  if (!value) {
-    throw new Error(`Missing env variable: ${name}`);
-  }
+  if (!value) throw new Error(`Missing env variable: ${name}`);
   return value;
 }
 
@@ -73,7 +74,7 @@ function makeShortDiff(oldText: string | null, newText: string): string {
   );
 }
 
-async function getPageText(): Promise<string> {
+async function getPageText(targetUrl: string): Promise<string> {
   const browser = await chromium.launch({ headless: true });
 
   try {
@@ -82,7 +83,7 @@ async function getPageText(): Promise<string> {
         "Mozilla/5.0 PageMonitor/1.0 (+personal availability notification; no automated application submission)",
     });
 
-    await page.goto(TARGET_URL, {
+    await page.goto(targetUrl, {
       waitUntil: "domcontentloaded",
       timeout: 30000,
     });
@@ -97,54 +98,45 @@ async function getPageText(): Promise<string> {
   }
 }
 
-async function main(): Promise<void> {
-  const supabaseUrl = requireEnv("SUPABASE_URL", SUPABASE_URL);
-  const supabaseKey = requireEnv(
-    "SUPABASE_SERVICE_ROLE_KEY",
-    SUPABASE_SERVICE_ROLE_KEY,
-  );
-  requireEnv("TARGET_URL", TARGET_URL);
-  requireEnv("SLACK_WEBHOOK_URL", SLACK_WEBHOOK_URL);
+async function checkPage(
+  targetUrl: string,
+  supabase: SupabaseClient,
+): Promise<void> {
+  console.log(`Checking: ${targetUrl}`);
 
-  const supabase = createClient(supabaseUrl, supabaseKey, {
-    auth: {
-      persistSession: false,
-      autoRefreshToken: false,
-    },
-  });
-
-  const jitterMs = Math.floor(Math.random() * 30000);
-  await sleep(jitterMs);
-
-  const currentText = await getPageText();
+  const currentText = await getPageText(targetUrl);
   const currentHash = hashText(currentText);
 
   const { data: previousState, error: selectError } = await supabase
     .from("page_state")
     .select("page_url,page_hash,page_text,updated_at")
-    .eq("page_url", TARGET_URL)
+    .eq("page_url", targetUrl)
     .maybeSingle<PageState>();
 
   if (selectError) {
-    throw new Error(`Supabase select error: ${selectError.message}`);
+    throw new Error(
+      `Supabase select error for ${targetUrl}: ${selectError.message}`,
+    );
   }
 
   if (!previousState) {
     const { error: insertError } = await supabase.from("page_state").insert({
-      page_url: TARGET_URL,
+      page_url: targetUrl,
       page_hash: currentHash,
       page_text: currentText,
       updated_at: new Date().toISOString(),
     });
 
     if (insertError) {
-      throw new Error(`Supabase insert error: ${insertError.message}`);
+      throw new Error(
+        `Supabase insert error for ${targetUrl}: ${insertError.message}`,
+      );
     }
 
     await sendSlackAlert(
-      `✅ Web Observer started. First snapshot saved.\n${TARGET_URL}`,
+      `✅ Web Observer started. First snapshot saved.\n${targetUrl}`,
     );
-    console.log("Initial snapshot saved.");
+    console.log(`Initial snapshot saved: ${targetUrl}`);
     return;
   }
 
@@ -153,7 +145,7 @@ async function main(): Promise<void> {
 
     const message = [
       "🚨 Page changed!",
-      `URL: ${TARGET_URL}`,
+      `URL: ${targetUrl}`,
       "",
       "Possible new content:",
       diffPreview.slice(0, 1000),
@@ -168,15 +160,50 @@ async function main(): Promise<void> {
         page_text: currentText,
         updated_at: new Date().toISOString(),
       })
-      .eq("page_url", TARGET_URL);
+      .eq("page_url", targetUrl);
 
     if (updateError) {
-      throw new Error(`Supabase update error: ${updateError.message}`);
+      throw new Error(
+        `Supabase update error for ${targetUrl}: ${updateError.message}`,
+      );
     }
 
-    console.log("Change detected and alert sent.");
+    console.log(`Change detected and alert sent: ${targetUrl}`);
   } else {
-    console.log("No change detected.");
+    console.log(`No change detected: ${targetUrl}`);
+  }
+}
+
+async function main(): Promise<void> {
+  if (TARGET_URLS.length === 0) {
+    throw new Error("Missing env variable: TARGET_URLS");
+  }
+
+  const supabaseUrl = requireEnv("SUPABASE_URL", SUPABASE_URL);
+  const supabaseKey = requireEnv(
+    "SUPABASE_SERVICE_ROLE_KEY",
+    SUPABASE_SERVICE_ROLE_KEY,
+  );
+  requireEnv("SLACK_WEBHOOK_URL", SLACK_WEBHOOK_URL);
+
+  const supabase = createClient(supabaseUrl, supabaseKey, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+    },
+  });
+
+  const jitterMs = Math.floor(Math.random() * 30000);
+  await sleep(jitterMs);
+
+  for (const targetUrl of TARGET_URLS) {
+    try {
+      await checkPage(targetUrl, supabase);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(message);
+      await sendSlackAlert(`⚠️ Web Observer error:\n${message}`);
+    }
   }
 }
 
@@ -185,7 +212,7 @@ main().catch(async (error: unknown) => {
   console.error(error);
 
   try {
-    await sendSlackAlert(`⚠️ Web Observer error:\n${message}`);
+    await sendSlackAlert(`⚠️ Web Observer fatal error:\n${message}`);
   } catch {}
 
   process.exit(1);
